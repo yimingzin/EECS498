@@ -6,7 +6,6 @@ import torch
 from a3_helper import softmax_loss
 from eecs598 import Solver
 
-
 def hello_fully_connected_networks():
     """
     This is a sample function that we will try to import and run to ensure that
@@ -434,14 +433,21 @@ class FullyConnectedNet(object):
         ##################################################################
         # Replace "pass" statement with your code
         L = self.num_layers
-        scores, cache = None, []
+        scores, cache, cache_dropout = None, [], []
         
         scores, cache_1 = Linear_ReLU.forward(X, self.params["W1"],self.params["b1"])
         cache.append(cache_1)
+        if self.use_dropout:
+          scores, cache_1 = Dropout.forward(scores, self.dropout_param)
+          cache_dropout.append(cache_1)
         
         for i in range(2, L):
           scores, cache_i = Linear_ReLU.forward(scores, self.params[f"W{i}"], self.params[f"b{i}"])
           cache.append(cache_i)
+            
+          if self.use_dropout:
+            scores, cache_i = Dropout.forward(scores, self.dropout_param)
+            cache_dropout.append(cache_i)
           
         scores, cache_fin = Linear.forward(scores, self.params[f"W{L}"], self.params[f"b{L}"])
         cache.append(cache_fin)
@@ -475,8 +481,13 @@ class FullyConnectedNet(object):
         grads[f"W{L}"] += 2 * self.reg * self.params[f"W{L}"]
         
         for i in range(L - 1, 0, -1):
+          if self.use_dropout:
+            dh = Dropout.backward(dh, cache_dropout[i-1])
+          
           dh, grads[f"W{i}"], grads[f"b{i}"] = Linear_ReLU.backward(dh, cache[i-1])
           grads[f"W{i}"] += 2 * self.reg * self.params[f"W{i}"]
+          
+          
         
         ###########################################################
         #                   END OF YOUR CODE                      #
