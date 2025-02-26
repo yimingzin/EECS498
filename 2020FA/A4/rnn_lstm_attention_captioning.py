@@ -30,8 +30,9 @@ class FeatureExtractor(object):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     self.device, self.dtype = device, dtype
-    weights = torchvision.models.MobileNet_V2_Weights.DEFAULT
-    self.mobilenet = models.mobilenet_v2(weights=weights).to(device)
+    # weights = torchvision.models.MobileNet_V2_Weights.DEFAULT
+    # self.mobilenet = models.mobilenet_v2(weights=weights).to(device)
+    self.mobilenet = models.mobilenet_v2(pretrained=True).to(device)
     self.mobilenet = nn.Sequential(*list(self.mobilenet.children())[:-1]) # Remove the last classifier
     
     # average pooling
@@ -323,6 +324,14 @@ class WordEmbedding(nn.Module):
                device='cpu', dtype=torch.float32):
       super().__init__()
       
+      # 把x从离散的单词索引转换为连续的向量表示
+      # x.shape = (N, T) N是句子的数量，T是每个句子的单词数量
+      '''
+        x = [
+            [4, 12, 5, 407, 0],  # 第一个句子：'a man on a bicycle <NULL>'
+            [7, 20, 15, 12, 8]   # 第二个句子：'the next two men in'
+        ]
+      '''
       # Register parameters
       self.W_embed = Parameter(torch.randn(vocab_size, embed_size,
                          device=device, dtype=dtype).div(math.sqrt(vocab_size)))
@@ -432,10 +441,12 @@ class CaptioningRNN(nn.Module):
 
         self.cell_type = cell_type
         self.word_to_idx = word_to_idx
+        # 生成一个索引对应单词的字典
         self.idx_to_word = {i: w for w, i in word_to_idx.items()}
 
         vocab_size = len(word_to_idx)
-
+        
+        # 取出 <NULL> <START> <END> 对应的索引
         self._null = word_to_idx['<NULL>']
         self._start = word_to_idx.get('<START>', None)
         self._end = word_to_idx.get('<END>', None)
@@ -457,7 +468,10 @@ class CaptioningRNN(nn.Module):
         #       feature and pooling=False to get the CNN activation map.         #
         ##########################################################################
         # Replace "pass" statement with your code
-        self.feature_extractor = FeatureExtractor(pooling=True, device=device, dtype=dtype)
+        if cell_type in ["rnn", "lstm"]:
+          self.feature_extractor = FeatureExtractor(pooling=True, device=device, dtype=dtype)
+        else:
+          self.feature_extractor = FeatureExtractor(pooling=False, device=device, dtype=dtype)
         
         self.input = nn.Linear(input_dim, hidden_dim, device=device, dtype=dtype)
         self.word_embed = WordEmbedding(vocab_size, wordvec_dim, device=device, dtype=dtype)
@@ -465,6 +479,14 @@ class CaptioningRNN(nn.Module):
         if cell_type == "rnn":
           self.network = RNN(wordvec_dim, hidden_dim, device=device, dtype=dtype)
           
+        # add LSTM
+        elif cell_type == "lstm":
+          self.network = LSTM(wordvec_dim, hidden_dim, device=device, dtype=dtype)
+          
+        # add LSTM Attention
+        elif cell_type == "attention":
+          self.network = AttentionLSTM(wordvec_dim, hidden_dim, device=device, dtype=dtype)
+        
         self.output = nn.Linear(hidden_dim, vocab_size, device=device, dtype=dtype)
         
         #############################################################################
@@ -473,6 +495,7 @@ class CaptioningRNN(nn.Module):
     
     def forward(self, images, captions):
         """
+        forward可以看作是在训练集上训练，sample是在测试集上测试，这两个的 h 都要分情况讨论
         Compute training-time loss for the RNN. We input images and
         ground-truth captions for those images, and use an RNN (or LSTM) to compute
         loss. The backward part will be done by torch.autograd.
@@ -481,6 +504,7 @@ class CaptioningRNN(nn.Module):
         - images: Input images, of shape (N, 3, 112, 112)
         - captions: Ground-truth captions; an integer array of shape (N, T + 1) where
           each element is in the range 0 <= y[i, t] < V
+           N是批次大小表示有多少句子， T是每个句子长度
 
         Outputs:
         - loss: A scalar loss
@@ -491,6 +515,9 @@ class CaptioningRNN(nn.Module):
         # by one relative to each other because the RNN should produce word (t+1)
         # after receiving word t. The first element of captions_in will be the START
         # token, and the first element of captions_out will be the first word.
+        # captions_in 和 captions_out 的形状都是 (N, T-1)
+        # captions_in 告诉模型当前处理的单词是什么
+        # captions_out 告诉模型下一个正确的单词是什么
         captions_in = captions[:, :-1]
         captions_out = captions[:, 1:]
 
@@ -522,7 +549,17 @@ class CaptioningRNN(nn.Module):
         if self.cell_type == "rnn":
           h0 = self.input(image_features)
           hT = self.network(x, h0)
+          
+        # add LSTM (same as 'rnn')
+        elif self.cell_type == "lstm":
+          h0 = self.input(image_features)
+          hT = self.network(x, h0)
         
+        # add LSTM Attention
+        elif self.cell_type == "attention":
+          A = self.input(image_features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+          hT = self.network(x, A)
+          
         scores = self.output(hT)
         loss = temporal_softmax_loss(scores, captions_out, self.ignore_index)
         
@@ -557,6 +594,8 @@ class CaptioningRNN(nn.Module):
           of captions should be the first sampled word, not the <START> token.
         """
         N = images.shape[0]
+        # images.new() 创建了形状为(N, max_length) device和dtype都和images相同的张量，
+        # 填充为1转为长整型乘以self._null -> <NULL>对应的索引全部初始化为<NULL>
         captions = self._null * images.new(N, max_length).fill_(1).long()
 
         if self.cell_type == 'attention':
@@ -591,18 +630,40 @@ class CaptioningRNN(nn.Module):
         ###########################################################################
         # Replace "pass" statement with your code
         
+        # 初始化一个 [N, 1] 值全部为<START>索引的张量， 确保生成的描述从这个单词开始
         words = images.new(N, 1).fill_(1).long() * self._start
         
         image_features = self.feature_extractor.extract_mobilenet_feature(images)
         
         if self.cell_type == "rnn":
           h = self.input(image_features)
+          
+        # add LSTM
+        elif self.cell_type == "lstm":
+          h = self.input(image_features)
+          c = torch.zeros_like(h)
+        
+        # add Attention
+        elif self.cell_type == 'attention':
+            A = self.input.forward(image_features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            h = A.mean(dim=(2, 3))
+            c = A.mean(dim=(2, 3))
+        
         
         for i in range(max_length):
           x = self.word_embed(words).reshape(N, -1)
           
           if self.cell_type == "rnn":
             h = self.network.step_forward(x, h)
+          
+          # LSTM
+          elif self.cell_type == "lstm":
+            h, c = self.network.step_forward(x, h, c)
+          
+          # LSTM Attention
+          elif self.cell_type == "attention":
+            attn, attn_weights_all[:, i, :, :] = dot_product_attention(h, A)
+            h, c = self.network.step_forward(x, h, c, attn)
             
           scores = self.output(h)
           words = torch.argmax(scores, dim=1)
@@ -647,7 +708,28 @@ def lstm_step_forward(x, prev_h, prev_c, Wx, Wh, b, attn=None, Wattn=None):
     # You may want to use torch.sigmoid() for the sigmoid function.             #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, H = prev_h.shape
+    
+    if attn is None:
+      a = torch.mm(x, Wx) + torch.mm(prev_h, Wh) + b
+    else:
+      a = torch.mm(x, Wx) + torch.mm(prev_h, Wh) + torch.mm(attn, Wattn) + b
+    
+    # 输入门
+    i = torch.sigmoid(a[:, :H])
+    # 遗忘门
+    f = torch.sigmoid(a[:, H:2*H])
+    # 输出门
+    o = torch.sigmoid(a[:, 2*H:3*H])
+    # 候选状态单元
+    g = torch.tanh(a[:, 3*H:4*H])
+    
+    # 单元状态c可以被看作是lstm的长期记忆，通过遗忘门f(sigmoid输出范围在0-1)控制前一时间步的单元状态prev_c中哪些部分应该被遗忘
+    # 加上通过输入门i(sigmoid输出范围在0-1)控制当前时间步的新信息g应该有多少被添加到单元状态中
+    next_c = f * prev_c + i * g
+    # 隐藏状态h是LSTM的短期记忆，用来决定当前时间步的输出并传递给下一个时间步。
+    # 通过输出门o决定哪些部分应该被输出为隐藏状态，将单元状态next_c通过tanh激活函数压缩值域到[-1, 1]
+    next_h = o * torch.tanh(next_c)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -683,7 +765,21 @@ def lstm_forward(x, h0, Wx, Wh, b):
     # You should use the lstm_step_forward function that you just defined.       #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, T, D = x.shape
+    N, H = h0.shape
+    
+    # 单元状态 c 是LSTM的内部状态，用于在不同时间步之间传递和存储长期记忆，不直接用于下游任务
+    # 主要用于在LSTM内部计算隐藏状态h, 通常不保存整个时间序列的状态。
+    h = torch.zeros(size=(N, T, H), dtype=h0.dtype, device=h0.device)
+    prev_h = h0
+    prev_c = c0
+    
+    for t in range(T):
+      next_h, next_c = lstm_step_forward(x[:, t, :], prev_h, prev_c, Wx, Wh, b)
+      h[:, t, :] = next_h
+      prev_h = next_h
+      prev_c = next_c
+    
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -761,8 +857,10 @@ def dot_product_attention(prev_h, A):
     - attn_weights: Attention weights, of shape (N, 4, 4)
     
     """
+    # (N, 1280, 4, 4)
     N, H, D_a, _ = A.shape
-
+    
+    
     attn, attn_weights = None, None
     #############################################################################
     # TODO: Implement the scaled dot-product attention we described earlier.    #
@@ -770,7 +868,23 @@ def dot_product_attention(prev_h, A):
     # HINT: Make sure you reshape attn_weights back to (N, 4, 4)!               #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    # A_flatten.shape = (N, 1280(H), 16)
+    A_flatten = A.reshape(N, H, -1)
+    
+    # prev_h.shape = (N, 1, 1280(H))
+    prev_h = prev_h.unsqueeze(-1).permute(0, 2, 1)
+    
+    attn_scores = torch.bmm(prev_h, A_flatten) / (H ** 0.5)
+    
+    # attn_weights.shape = (N, 1, 16)
+    attn_weights = F.softmax(attn_scores, dim=-1)
+    # attn.shape = (N, 1280(H), 1)
+    attn = torch.bmm(A_flatten, attn_weights.reshape(N, D_a ** 2, 1))
+    
+    # 调整形状
+    attn = attn.reshape(N, H)
+    attn_weights = attn_weights.reshape(N, D_a, D_a)
+    
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -819,7 +933,21 @@ def attention_forward(x, A, Wx, Wh, Wattn, b):
     # function that you just defined.                                           #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, T, D = x.shape
+    H = A.shape[1]
+    
+    h = torch.zeros(size=(N, T, H), dtype=A.dtype, device=A.device)
+    
+    prev_h = h0
+    prev_c = c0
+    
+    for t in range(T):
+      attn, attn_weights = dot_product_attention(prev_h, A)
+      next_h, next_c = lstm_step_forward(x[:, t, :], prev_h, prev_c, Wx, Wh, b, attn, Wattn)
+      h[:, t, :] = next_h
+      prev_h = next_h
+      prev_c = next_c
+    
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
