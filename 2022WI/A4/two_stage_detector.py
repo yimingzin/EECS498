@@ -812,16 +812,25 @@ class RPN(nn.Module):
             # Step 1: Sample a few anchor boxes for training
             fg_idx, bg_idx = sample_rpn_training(matched_gt_boxes, 
               self.batch_size_per_image * num_images, fg_fraction=0.5)
+            # 包含所有采样到的锚框的索引
             idx = torch.cat((fg_idx, bg_idx), 0)
+            # 将前景设置为1
             sampled_gt_fg = torch.ones_like(fg_idx)
+            # 背景设置为0
             sampled_gt_bg = torch.zeros_like(bg_idx)
+            # 包含所有采样锚框GT物体性标签（前景为1，背景为0）作为物体分类性损失的GT目标
             sampled_gt_objectness = torch.cat((sampled_gt_fg, sampled_gt_bg), 0).float()
 
             # Step 2: Compute GT targets for box regression
+            # 确定被采样的生成锚框的坐标
             sampled_anchor_boxes = anchor_boxes[idx]
+            # 确定被采样的生成锚框对应的GT框信息
             sampled_matched_gt_boxes = matched_gt_boxes[idx]
+            # 被采样的生成锚框的物体性预测输出
             sampled_pred_obj_logits = pred_obj_logits[idx]
+            # 被采样的生成锚框的delta值
             sampled_pred_boxreg_deltas = pred_boxreg_deltas[idx]
+            # 被采样的生成锚框对应真实锚框的delta值
             sampled_gt_deltas = rcnn_get_deltas_from_anchors(sampled_anchor_boxes,
                           sampled_matched_gt_boxes)
 
